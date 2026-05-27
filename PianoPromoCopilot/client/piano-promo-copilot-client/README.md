@@ -1,0 +1,1 @@
+Angular v21 client placeholder with routes: /dashboard, /videos, /videos/:youtubeVideoId, /videos/:youtubeVideoId/optimize, /videos/:youtubeVideoId/promotions, /videos/:youtubeVideoId/analytics, /settings.
