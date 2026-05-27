@@ -7,7 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddCors(o => o.AddPolicy("dev", p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddHttpClient();
 
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? builder.Configuration["ConnectionStrings__DefaultConnection"];
@@ -22,18 +22,21 @@ else
 
 builder.Services.AddScoped<ComplianceReviewService>();
 builder.Services.AddScoped<VideoOptimizationService>();
+builder.Services.AddScoped<AnalyticsRecommendationService>();
 
 if (string.IsNullOrWhiteSpace(builder.Configuration["OpenAI:ApiKey"] ?? builder.Configuration["OpenAI__ApiKey"]))
     builder.Services.AddScoped<ILlmService, MockLlmService>();
 else
     builder.Services.AddScoped<ILlmService, OpenAiLlmService>();
 
-builder.Services.AddScoped<IYouTubeService, MockYouTubeService>();
+if (bool.TryParse(builder.Configuration["Features:UseMockYouTube"] ?? builder.Configuration["Features__UseMockYouTube"], out var useMock) && useMock)
+    builder.Services.AddScoped<IYouTubeService, MockYouTubeService>();
+else
+    builder.Services.AddScoped<IYouTubeService, GoogleYouTubeService>();
 
 var app = builder.Build();
 app.UseCors("dev");
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
 
 using (var scope = app.Services.CreateScope())
 {
@@ -46,6 +49,33 @@ app.MapGet("/api/health", () => Results.Ok(new { status = "ok", mockMode = true 
 
 app.MapGet("/api/videos", async (AppDbContext db, CancellationToken ct) =>
     Results.Ok(await db.YouTubeVideos.OrderByDescending(v => v.CreatedAt).ToListAsync(ct)));
+
+app.MapGet("/api/videos/{youtubeVideoId}", async (string youtubeVideoId, AppDbContext db, CancellationToken ct) =>
+{
+    var v = await db.YouTubeVideos.FirstOrDefaultAsync(x => x.YouTubeVideoId == youtubeVideoId, ct);
+    return v is null ? Results.NotFound() : Results.Ok(v);
+});
+
+app.MapPost("/api/videos", async (YouTubeVideo video, AppDbContext db, CancellationToken ct) =>
+{
+    db.YouTubeVideos.Add(video);
+    await db.SaveChangesAsync(ct);
+    return Results.Created($"/api/videos/{video.YouTubeVideoId}", video);
+});
+
+app.MapPut("/api/videos/{youtubeVideoId}", async (string youtubeVideoId, YouTubeVideo input, AppDbContext db, CancellationToken ct) =>
+{
+    var v = await db.YouTubeVideos.FirstOrDefaultAsync(x => x.YouTubeVideoId == youtubeVideoId, ct);
+    if (v is null) return Results.NotFound();
+    v.Title = input.Title;
+    v.Description = input.Description;
+    v.Mood = input.Mood;
+    v.Style = input.Style;
+    v.TargetAudience = input.TargetAudience;
+    v.UpdatedAt = DateTime.UtcNow;
+    await db.SaveChangesAsync(ct);
+    return Results.Ok(v);
+});
 
 app.MapPost("/api/videos/optimize", async (OptimizeVideoRequest req, VideoOptimizationService svc, AppDbContext db, CancellationToken ct) =>
 {
@@ -128,6 +158,22 @@ app.MapPost("/api/videos/{youtubeVideoId}/promotion-drafts", async (string youtu
     await db.SaveChangesAsync(ct);
     return Results.Ok(drafts);
 });
+
+app.MapGet("/api/videos/{youtubeVideoId}/analytics", async (string youtubeVideoId, AppDbContext db, CancellationToken ct) =>
+    Results.Ok(await db.VideoAnalyticsSnapshots.Where(x => x.YouTubeVideoId == youtubeVideoId).ToListAsync(ct)));
+
+app.MapPost("/api/videos/{youtubeVideoId}/recommendations", async (string youtubeVideoId, AppDbContext db, AnalyticsRecommendationService svc, CancellationToken ct) =>
+{
+    var snaps = await db.VideoAnalyticsSnapshots.Where(x => x.YouTubeVideoId == youtubeVideoId).OrderBy(x => x.SnapshotDate).ToListAsync(ct);
+    var data = snaps.Select(s => (s.Views, s.Likes, s.Comments, s.AverageViewDurationSeconds, s.Impressions, s.ImpressionClickThroughRate, s.TrafficSource, s.Country)).ToList();
+    return Results.Ok(svc.Analyze(data));
+});
+
+app.MapGet("/api/youtube/channel", async (IYouTubeService yt, CancellationToken ct) =>
+    Results.Ok(await yt.GetChannelAsync(ct)));
+
+app.MapGet("/api/youtube/videos", async (IYouTubeService yt, CancellationToken ct) =>
+    Results.Ok(await yt.GetVideosAsync(ct)));
 
 app.Run();
 
